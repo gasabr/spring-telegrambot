@@ -2,18 +2,13 @@ package me.gasabr.telegram
 
 import com.pengrad.telegrambot.TelegramBot
 import com.pengrad.telegrambot.UpdatesListener
-import com.pengrad.telegrambot.model.File
 import com.pengrad.telegrambot.model.Update
 import com.pengrad.telegrambot.request.SendMessage
-import com.pengrad.telegrambot.request.SetWebhook
 import io.micrometer.common.util.internal.logging.Slf4JLoggerFactory
 import jakarta.annotation.PostConstruct
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.autoconfigure.SpringBootApplication
-import org.springframework.boot.context.properties.ConfigurationProperties
-import org.springframework.boot.context.properties.EnableConfigurationProperties
-import org.springframework.boot.context.properties.bind.ConstructorBinding
 import org.springframework.boot.runApplication
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -67,14 +62,6 @@ class TelegramBotSetup(
         }
     }
 
-    @PostConstruct
-    fun configureBotForWebhooks() {
-        val request = SetWebhook()
-            .url("")
-            .certificate(java.io.File("filename"))
-        telegramBot.execute(request)
-    }
-
     private fun parseUpdateType(update: Update): Events {
         // fixme: parse the type properly here
         return Events.GOT_TEXT
@@ -117,11 +104,7 @@ fun sendNamePrompt(stateContext: StateContext<States, Events>, telegramBot: Tele
 fun sendHelloWorld(stateContext: StateContext<States, Events>, telegramBot: TelegramBot) {
     val update = getUpdateFromContext(stateContext)
     val name = update.message().text()
-    if (name != "Gleb") {
-        throw RuntimeException("example exception.")
-    } else {
-        telegramBot.execute(SendMessage(update.replyChatId(), "okay, ${name}!"))
-    }
+    telegramBot.execute(SendMessage(update.replyChatId(), "okay, ${name}!"))
 }
 
 @Configuration
@@ -132,7 +115,6 @@ class StateMachineConfig(
 
     override fun configure(states: StateMachineStateConfigurer<States, Events>) {
         super.configure(states)
-        val x = {}
         states.withStates()
             .initial(States.IDLE)
             .choice(States.GOT_CMD)
@@ -141,11 +123,11 @@ class StateMachineConfig(
             .withStates()
             .parent(States.GOT_CMD)
             .initial(States.GOT_HELLO_CMD)
-            .stateEntry(States.GOT_HELLO_CMD, CallbackAction(telegramBot) { c, b ->
+            .stateEntry(States.GOT_HELLO_CMD, CallbackAction { c ->
                 // do something with c & b
-                sendNamePrompt(c, b)
+                sendNamePrompt(c, telegramBot)
             })
-            .state(States.GOT_NAME, CallbackAction(telegramBot) { c, _ ->
+            .state(States.GOT_NAME, CallbackAction { c ->
                 // do something with c & b
                 sendHelloWorld(c, telegramBot)
             })
@@ -181,7 +163,7 @@ class StateMachineConfig(
             .source(States.GOT_CMD)
             .first(States.GOT_HELLO_CMD, CommandGuard("hello"))
             .then(States.GOT_ANOTHER_CMD, CommandGuard("another"))
-            .last(States.IDLE, CallbackAction(telegramBot) { c, b -> })
+            .last(States.IDLE, CallbackAction { _ -> })
 
     }
 }
@@ -190,10 +172,8 @@ class StateMachineConfig(
  * @param errorEvent -- in case of error when running callback, action will send `errorEvent` to the State Machine.
  */
 class CallbackAction(
-    // fixme: looks like I can simplify callback and not provide this argument
-    private val telegramBot: TelegramBot,
     private val errorEvent: Events = Events.GOT_INVALID_INPUT,
-    private val callback: (StateContext<States, Events>, TelegramBot) -> Unit,
+    private val callback: (StateContext<States, Events>) -> Unit,
 ) : Action<States, Events> {
     companion object {
         private val logger = Slf4JLoggerFactory.getInstance(CallbackAction::class.java)
@@ -201,9 +181,9 @@ class CallbackAction(
 
     override fun execute(context: StateContext<States, Events>) {
         try {
-            callback(context, telegramBot)
+            callback(context)
         } catch (e: Exception) {
-            logger.error("Error running callback: ${e.message}")
+            logger.error("Got error executing callback: ${e.message}")
             context.stateMachine.sendEvent(Mono.just(GenericMessage(errorEvent))).blockFirst()
         }
 
