@@ -55,16 +55,22 @@ class TelegramBotSetup(
         telegramBot.setUpdatesListener {
             logger.info("Got some updates.")
             it.forEach { upd ->
-                // fixme: there should be a better way to do it
                 val smKey = upd.replyChatId()
-                val sm = conversationStates.get(smKey) ?: stateMachineFactory.getStateMachine(smKey.toString())
-                this.conversationStates[smKey] = sm
+                val sm = conversationStates.computeIfAbsent(smKey) { key ->
+                    return@computeIfAbsent stateMachineFactory.getStateMachine(key.toString())
+                }
 
                 // fixme: how does this work, if I have not yet persisted anything?
                 sm.startReactively().block()
                 sm.extendedState.variables["update"] = upd
                 logger.debug("Currently state machine is in `${sm.state.id}` state.")
                 sm.sendEvent(Mono.just(GenericMessage(Events.GOT_TEXT))).blockFirst()
+                logger.debug("After handling event state machine is in `${sm.state.id}` state.")
+
+                if (sm.state.id == States.CONVERSATION_ENDED) {
+                    // removing sm from memory once we got to the terminal state
+                    conversationStates.remove(smKey)
+                }
             }
 
             return@setUpdatesListener UpdatesListener.CONFIRMED_UPDATES_ALL
@@ -85,6 +91,7 @@ enum class States {
 enum class Events {
     GOT_TEXT,
     GOT_INVALID_INPUT,
+    SENT_RESPONSE,
 }
 
 private fun getUpdateFromContext(stateContext: StateContext<States, Events>): Update {
@@ -138,6 +145,7 @@ class StateMachineConfig(
             .initial(States.IDLE)
             .choice(States.GOT_CMD)
             .states(States.entries.toTypedArray().toMutableSet())
+            .end(States.CONVERSATION_ENDED)
             .and()
             .withStates()
             .parent(States.GOT_CMD)
@@ -148,12 +156,13 @@ class StateMachineConfig(
             .state(States.GOT_NAME, CallbackAction { c ->
                 sendHelloWorld(c, telegramBot)
             })
+            .and()
+            .withStates()
             .parent(States.GOT_CMD)
             .initial(States.GOT_ANOTHER_CMD)
             .stateEntry(States.GOT_ANOTHER_CMD, CallbackAction { context ->
                 sendEcho(context, telegramBot)
             })
-            .end(States.CONVERSATION_ENDED)
     }
 
     override fun configure(transitions: StateMachineTransitionConfigurer<States, Events>) {
@@ -185,7 +194,12 @@ class StateMachineConfig(
             .first(States.GOT_HELLO_CMD, CommandGuard("hello"))
             .then(States.GOT_ANOTHER_CMD, CommandGuard("another"))
             .last(States.IDLE, CallbackAction { ctx -> sendError(ctx, telegramBot, "Can not parse command.") })
-
+            .and()
+            // fixme: this should be internal transition or something
+            .withExternal()
+            .source(States.GOT_ANOTHER_CMD)
+            .event(Events.SENT_RESPONSE)
+            .target(States.CONVERSATION_ENDED)
     }
 }
 
@@ -207,7 +221,7 @@ class CallbackAction(
             logger.error("Got error executing callback: ${e.message}")
             context.stateMachine.sendEvent(Mono.just(GenericMessage(errorEvent))).blockFirst()
         }
-
+        context.stateMachine.sendEvent(Mono.just(GenericMessage(Events.SENT_RESPONSE))).blockFirst()
     }
 }
 
