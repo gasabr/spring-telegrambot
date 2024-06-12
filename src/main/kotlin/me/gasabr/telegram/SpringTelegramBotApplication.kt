@@ -16,13 +16,15 @@ import org.springframework.messaging.support.GenericMessage
 import org.springframework.statemachine.StateContext
 import org.springframework.statemachine.StateMachine
 import org.springframework.statemachine.action.Action
-import org.springframework.statemachine.config.EnableStateMachine
+import org.springframework.statemachine.config.EnableStateMachineFactory
 import org.springframework.statemachine.config.StateMachineConfigurerAdapter
+import org.springframework.statemachine.config.StateMachineFactory
 import org.springframework.statemachine.config.builders.StateMachineStateConfigurer
 import org.springframework.statemachine.config.builders.StateMachineTransitionConfigurer
 import org.springframework.statemachine.guard.Guard
 import org.springframework.stereotype.Component
 import reactor.core.publisher.Mono
+
 
 /// main function is at the bottom of the file
 @SpringBootApplication
@@ -37,8 +39,10 @@ class TelegramConfiguration {
 @Component
 class TelegramBotSetup(
     private val telegramBot: TelegramBot,
-    private val stateMachine: StateMachine<States, Events>
+    private val stateMachineFactory: StateMachineFactory<States, Events>,
 ) {
+
+    private val conversationStates: MutableMap<Long, StateMachine<States, Events>> = mutableMapOf()
 
     companion object {
         val logger = LoggerFactory.getLogger(TelegramBotSetup::class.java)!!
@@ -51,20 +55,20 @@ class TelegramBotSetup(
         telegramBot.setUpdatesListener {
             logger.info("Got some updates.")
             it.forEach { upd ->
+                // fixme: there should be a better way to do it
+                val smKey = upd.replyChatId()
+                val sm = conversationStates.get(smKey) ?: stateMachineFactory.getStateMachine(smKey.toString())
+                this.conversationStates[smKey] = sm
+
                 // fixme: how does this work, if I have not yet persisted anything?
-                stateMachine.startReactively().block()
-                stateMachine.extendedState.variables["update"] = upd
-                logger.debug("Currently state machine is in `${stateMachine.state.id}` state.")
-                stateMachine.sendEvent(Mono.just(GenericMessage(parseUpdateType(upd)))).blockFirst()
+                sm.startReactively().block()
+                sm.extendedState.variables["update"] = upd
+                logger.debug("Currently state machine is in `${sm.state.id}` state.")
+                sm.sendEvent(Mono.just(GenericMessage(Events.GOT_TEXT))).blockFirst()
             }
 
             return@setUpdatesListener UpdatesListener.CONFIRMED_UPDATES_ALL
         }
-    }
-
-    private fun parseUpdateType(update: Update): Events {
-        // fixme: parse the type properly here
-        return Events.GOT_TEXT
     }
 }
 
@@ -107,8 +111,23 @@ fun sendHelloWorld(stateContext: StateContext<States, Events>, telegramBot: Tele
     telegramBot.execute(SendMessage(update.replyChatId(), "okay, ${name}!"))
 }
 
+fun sendEcho(stateContext: StateContext<States, Events>, telegramBot: TelegramBot) {
+    val update = getUpdateFromContext(stateContext)
+    val textWithoutCommand = update.message()
+        .text()
+        .split(" ")
+        .drop(1)
+        .joinToString(" ")
+    telegramBot.execute(SendMessage(update.replyChatId(), textWithoutCommand))
+}
+
+fun sendError(stateContext: StateContext<States, Events>, telegramBot: TelegramBot, errorMessage: String) {
+    val update = getUpdateFromContext(stateContext)
+    telegramBot.execute(SendMessage(update.replyChatId(), errorMessage))
+}
+
 @Configuration
-@EnableStateMachine
+@EnableStateMachineFactory
 class StateMachineConfig(
     private val telegramBot: TelegramBot,
 ) : StateMachineConfigurerAdapter<States, Events>() {
@@ -124,12 +143,15 @@ class StateMachineConfig(
             .parent(States.GOT_CMD)
             .initial(States.GOT_HELLO_CMD)
             .stateEntry(States.GOT_HELLO_CMD, CallbackAction { c ->
-                // do something with c & b
                 sendNamePrompt(c, telegramBot)
             })
             .state(States.GOT_NAME, CallbackAction { c ->
-                // do something with c & b
                 sendHelloWorld(c, telegramBot)
+            })
+            .parent(States.GOT_CMD)
+            .initial(States.GOT_ANOTHER_CMD)
+            .stateEntry(States.GOT_ANOTHER_CMD, CallbackAction { context ->
+                sendEcho(context, telegramBot)
             })
             .end(States.CONVERSATION_ENDED)
     }
@@ -157,13 +179,12 @@ class StateMachineConfig(
             .event(Events.GOT_INVALID_INPUT)
             .source(States.GOT_NAME)
             .target(States.GOT_HELLO_CMD)
-
             .and()
             .withChoice()
             .source(States.GOT_CMD)
             .first(States.GOT_HELLO_CMD, CommandGuard("hello"))
             .then(States.GOT_ANOTHER_CMD, CommandGuard("another"))
-            .last(States.IDLE, CallbackAction { _ -> })
+            .last(States.IDLE, CallbackAction { ctx -> sendError(ctx, telegramBot, "Can not parse command.") })
 
     }
 }
