@@ -4,8 +4,8 @@ import com.pengrad.telegrambot.TelegramBot
 import com.pengrad.telegrambot.UpdatesListener
 import com.pengrad.telegrambot.model.Update
 import com.pengrad.telegrambot.request.SendMessage
-import io.micrometer.common.util.internal.logging.Slf4JLoggerFactory
 import jakarta.annotation.PostConstruct
+import jakarta.annotation.PreDestroy
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.autoconfigure.SpringBootApplication
@@ -50,22 +50,19 @@ class TelegramBotSetup(
 
     @PostConstruct
     fun configureBot() {
-        logger.info("Configuring telegram bot to use pulling.")
+        logger.info("Configuring telegram bot to use polling.")
 
         telegramBot.setUpdatesListener {
-            logger.info("Got some updates.")
+            logger.debug("Got ${it.size} updates.")
             it.forEach { upd ->
                 val smKey = upd.replyChatId()
                 val sm = conversationStates.computeIfAbsent(smKey) { key ->
                     return@computeIfAbsent stateMachineFactory.getStateMachine(key.toString())
                 }
 
-                // fixme: how does this work, if I have not yet persisted anything?
                 sm.startReactively().block()
                 sm.extendedState.variables["update"] = upd
-                logger.debug("Currently state machine is in `${sm.state.id}` state.")
-                sm.sendEvent(Mono.just(GenericMessage(Events.GOT_TEXT))).blockFirst()
-                logger.debug("After handling event state machine is in `${sm.state.id}` state.")
+                sendSmEvent(sm, Events.GOT_TEXT)
 
                 if (sm.state.id == States.CONVERSATION_ENDED) {
                     // removing sm from memory once we got to the terminal state
@@ -75,6 +72,11 @@ class TelegramBotSetup(
 
             return@setUpdatesListener UpdatesListener.CONFIRMED_UPDATES_ALL
         }
+    }
+
+    @PreDestroy
+    fun turnOffBotUpdates() {
+        telegramBot.removeGetUpdatesListener()
     }
 }
 
@@ -132,6 +134,17 @@ fun sendError(stateContext: StateContext<States, Events>, telegramBot: TelegramB
     val update = getUpdateFromContext(stateContext)
     telegramBot.execute(SendMessage(update.replyChatId(), errorMessage))
 }
+
+private fun sendSmEvent(stateMachine: StateMachine<States, Events>, event: Events) {
+    val logger = LoggerFactory.getLogger("SmSender")
+    stateMachine.sendEvent(Mono.just(GenericMessage(event))).subscribe(
+        {
+            logger.debug("Sent event={} to the sm", event)
+        }, { sendingException ->
+            logger.error("Error when sending event to state machine: $sendingException")
+        })
+}
+
 
 @Configuration
 @EnableStateMachineFactory
@@ -195,7 +208,6 @@ class StateMachineConfig(
             .then(States.GOT_ANOTHER_CMD, CommandGuard("another"))
             .last(States.IDLE, CallbackAction { ctx -> sendError(ctx, telegramBot, "Can not parse command.") })
             .and()
-            // fixme: this should be internal transition or something
             .withExternal()
             .source(States.GOT_ANOTHER_CMD)
             .event(Events.SENT_RESPONSE)
@@ -211,7 +223,7 @@ class CallbackAction(
     private val callback: (StateContext<States, Events>) -> Unit,
 ) : Action<States, Events> {
     companion object {
-        private val logger = Slf4JLoggerFactory.getInstance(CallbackAction::class.java)
+        private val logger = LoggerFactory.getLogger(CallbackAction::class.java)
     }
 
     override fun execute(context: StateContext<States, Events>) {
@@ -219,9 +231,9 @@ class CallbackAction(
             callback(context)
         } catch (e: Exception) {
             logger.error("Got error executing callback: ${e.message}")
-            context.stateMachine.sendEvent(Mono.just(GenericMessage(errorEvent))).blockFirst()
+            sendSmEvent(context.stateMachine, errorEvent)
         }
-        context.stateMachine.sendEvent(Mono.just(GenericMessage(Events.SENT_RESPONSE))).blockFirst()
+        sendSmEvent(context.stateMachine, Events.SENT_RESPONSE)
     }
 }
 
