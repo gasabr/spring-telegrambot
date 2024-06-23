@@ -24,6 +24,8 @@ import org.springframework.statemachine.config.builders.StateMachineTransitionCo
 import org.springframework.statemachine.guard.Guard
 import org.springframework.stereotype.Component
 import reactor.core.publisher.Mono
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentMap
 
 
 /// main function is at the bottom of the file
@@ -42,7 +44,7 @@ class TelegramBotSetup(
     private val stateMachineFactory: StateMachineFactory<States, Events>,
 ) {
 
-    private val conversationStates: MutableMap<Long, StateMachine<States, Events>> = mutableMapOf()
+    private val conversationStates : ConcurrentHashMap<Long, StateMachine<States, Events>> = ConcurrentHashMap()
 
     companion object {
         val logger = LoggerFactory.getLogger(TelegramBotSetup::class.java)!!
